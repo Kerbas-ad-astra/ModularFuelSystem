@@ -235,7 +235,7 @@ namespace RealFuels
                 if (maxTechLevel < 0)
                     maxTechLevel = TechLevel.MaxTL(node, engineType);
                 if (minTechLevel < 0)
-                    minTechLevel = origTechLevel;
+                    minTechLevel = (origTechLevel < techLevel ? origTechLevel : techLevel);
             }
 
             if(origMass >= 0)
@@ -408,6 +408,23 @@ namespace RealFuels
                     }*/
                     if (gimbalR != -1f)
                         info += ", Gimbal " + gimbalR.ToString("N1");
+
+                    if (config.HasValue("ullage"))
+                        info += ", " + (config.GetValue("ullage").ToLower() == "true" ? "ullage" : "no ullage");
+                    if (config.HasValue("pressureFed") && config.GetValue("pressureFed").ToLower() == "true")
+                        info += ", pfed";
+
+                    if (config.HasValue("ignitions"))
+                    {
+                        int ignitions;
+                        if (int.TryParse(config.GetValue("ignitions"), out ignitions))
+                        {
+                            if (ignitions > 0)
+                                info += ", " + ignitions + " ignition" + (ignitions > 1 ? "s" : "");
+                            else
+                                info += ", unl. ignitions";
+                        }
+                    }
                     info += ")\n";
                 }
 
@@ -636,22 +653,9 @@ namespace RealFuels
                         else // backwards compatible with EI nodes when using RF ullage etc.
                         {
                             ConfigNode eiNode = config.GetNode("ModuleEngineIgnitor");
-                            int ignitions = -1;
-                            string ignitionsString = "";
-                            if (config.HasValue("ignitions"))
+                            if (eiNode.HasValue("ignitionsAvailable") && !config.HasValue("ignitions"))
                             {
-                                ignitionsString = config.GetValue("ignitions");
-                                config.RemoveValue("ignitions");
-                            }
-                            else if (eiNode.HasValue("ignitionsAvailable"))
-                            {
-                                ignitionsString = eiNode.GetValue("ignitionsAvailable");
-                            }
-                            if (!string.IsNullOrEmpty(ignitionsString) && int.TryParse(ignitionsString, out ignitions))
-                            {
-                                ignitions = ConfigIgnitions(ignitions);
-                                if ((!HighLogic.LoadedSceneIsFlight || (vessel != null && vessel.situation == Vessel.Situations.PRELAUNCH)))
-                                    config.AddValue("ignitions", ignitions);
+                                config.AddValue("ignitions", eiNode.GetValue("ignitionsAvailable"));
                             }
                             if (eiNode.HasValue("useUllageSimulation") && !config.HasValue("ullage"))
                                 config.AddValue("ullage", eiNode.GetValue("useUllageSimulation"));
@@ -660,8 +664,21 @@ namespace RealFuels
                             if (!config.HasNode("IGNITOR_RESOURCE"))
                                 foreach (ConfigNode resNode in eiNode.GetNodes("IGNITOR_RESOURCE"))
                                     config.AddNode(resNode);
-
                         }
+                    }
+                    if (config.HasValue("ignitions"))
+                    {
+                        int ignitions;
+                        if ((!HighLogic.LoadedSceneIsFlight || (vessel != null && vessel.situation == Vessel.Situations.PRELAUNCH)))
+                        {
+                            if (int.TryParse(config.GetValue("ignitions"), out ignitions))
+                            {
+                                ignitions = ConfigIgnitions(ignitions);
+                                config.SetValue("ignitions", ignitions.ToString());
+                            }
+                        }
+                        else
+                            config.RemoveValue("ignitions");
                     }
 
                     if (pModule is ModuleEnginesRF)
