@@ -49,6 +49,49 @@ AN OVERVIEW OF FUEL TYPES AND TANK TYPES AND TECH LEVELS/ENGINE TYPES AND UPGRAD
 
 ==========
 Changelog:
+v10.8.1
+* Update to SolverEngines v1.13.
+* Fix emissives patch for 1.0.5.
+* Add some patch magic to the emissives patch to fix VenStockRevamp engine emissives.
+* Add LOX insulation to tank type Cryogenic.
+
+v10.8
+* Update for KSP 1.0.5, start to tune boiloff for new thermo.
+* Add tooltips when hovering over (locked or unlocked) engine configs in the engine GUI.
+* Support descriptions for engine configs (key 'description' in the CONFIG). They are shown on the editor tooltip and in the config tooltip in the engine GUI.
+
+v10.7.2
+* Increased boiloff rate can be switched off by adding ferociousBoilOff = False to MFSSETTINGS (best use MM patch for that)
+* PhysicsGlobal.conductionFactor can be compensated for by adding globalConductionCompensation = true to MFSSETTINGS (use at own risk)
+* cryogenic outerInsulation improved to 0.0005 (previous value 0.01)
+* All LOX tanks now assume stainless steel tanks, except the ServiceModule.
+
+v10.7.1
+* Fixed bug where individual tank insulation/tank values weren't loading
+in.
+* Increased heat leak flux based on  part thermal mass (total) / part
+thermal mass - resource mass.
+* Tweaked ServiceModule and Default tank insulation values. (service module insulation calculated assuming Inconel/Titanium + vacuum/vapor shielded tanks.)
+
+v10.7
+* Revamped boiloff code for cryogenic propellants to be compatible with KSP 1.0.x thermodynamics (tanks will be properly cooled by evaporation of boiled off resources)
+* For now, only LqdOxygen, LqdHydrogen, LqdMethane and LqdAmmonia use the new system. (others may be added if needed) 
+* Insulation can be either for the whole tank part or per each internal tank.
+* Fix issue where TL was not being correctly reset on config change.
+
+v10.6.1
+* Fix throttling via `throttle` in CONFIG (minThrust was not being set properly).
+* Work around an ignition resource issue (due to, apparently, either a float precision issue or a bug in stock KSP code).
+
+v10.6
+* New throttling behavior. Old bugs with it were fixed, and now there is a proper delay while thrust builds up, when igniting a liquid engine. It will take about two seconds for an F-1 class engine to build up to full thrust. The rate can be tweaked, set throttleResponseRate in the ModuleEnginesRF (or in a CONFIG that's applied to one). By default when the current throttle is within 0.5% of the desired throttle, the engine clamps to the desired throttle. Further, when setting 0 throttle, the engine instantly shuts off (the latter will change, later). WORD TO THE WISE: Use launch clamps, and make sure your engines are at full thrust before disengaging the clamps!
+* Fix for sometime "says stable but fails to ignite" issue. Supreme thanks for stratochief66 for figuring out where to look!
+* Increase ullage acceleration threshold. Cryo stages will no longer keep themselves at Very Stable, but it won't take much thrust to ullage them.
+* Add tanks for the other Ethanol resources.
+
+v10.5.1
+* Fix issue with CONFIG entry costs being lost.
+
 v10.5
 * Update to SolverEngines v1.9.
 * Auto-remove Interstellar Fuel Switch or FS Fuel Switch modules on parts that have RF tank modules on them too.

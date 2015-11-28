@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections;
 using System.Linq;
 using System.Text;
 using UnityEngine;
@@ -12,7 +13,7 @@ using System.Reflection;
 
 namespace RealFuels.Tanks
 {
-	public class ModuleFuelTanks : PartModule, IModuleInfo, IPartCostModifier, IPartMassModifier
+    public class ModuleFuelTanks : PartModule, IModuleInfo, IPartCostModifier, IPartMassModifier, IAnalyticTemperatureModifier, IAnalyticPreview
 	{
 		bool compatible = true;
         #region TestFlight
@@ -149,6 +150,7 @@ namespace RealFuels.Tanks
 					MFSSettings.SaveOverrideList(part, node.GetNodes("TANK"));
 					ParseBaseMass(node);
 					ParseBaseCost(node);
+                    ParseInsulationFactor(node);
 					typesAvailable = node.GetValues ("typeAvailable");
 					RecordManagedResources ();
 				} else if (isEditorOrFlight) {
@@ -239,24 +241,34 @@ namespace RealFuels.Tanks
 				return;
 			}
             enabled = true; // just in case...
-			
+
 			Events["HideUI"].active = false;
 			Events["ShowUI"].active = true;
 
-			if (isEditor) {
-				GameEvents.onPartActionUIDismiss.Add(OnPartActionGuiDismiss);
-				TankWindow.OnActionGroupEditorOpened.Add (OnActionGroupEditorOpened);
-				TankWindow.OnActionGroupEditorClosed.Add (OnActionGroupEditorClosed);
-				if (part.symmetryCounterparts.Count > 0) {
-					UpdateTankType (false);
-					massDirty = true;
-				}
+#if DEBUG
+            Fields["debug1Display"].guiActive = true;
+            Fields["debug2Display"].guiActive = true;
+#endif
 
-				InitializeTankType ();
-				InitializeUtilization ();
-			}
 
+            if (isEditor)
+            {
+                GameEvents.onPartActionUIDismiss.Add (OnPartActionGuiDismiss);
+                TankWindow.OnActionGroupEditorOpened.Add (OnActionGroupEditorOpened);
+                TankWindow.OnActionGroupEditorClosed.Add (OnActionGroupEditorClosed);
+                if (part.symmetryCounterparts.Count > 0)
+                {
+                    UpdateTankType (false);
+                    massDirty = true;
+                }
+
+                InitializeTankType ();
+                InitializeUtilization ();
+            }
 			CalculateMass ();
+            CalculateTankArea(out tankArea);
+            part.heatConductivity = Math.Min(part.heatConductivity, outerInsulationFactor);
+            part.skinInternalConductionMult = Math.Min(part.skinInternalConductionMult, outerInsulationFactor);
 		}
 
 		public override void OnSave (ConfigNode node)
@@ -297,64 +309,197 @@ namespace RealFuels.Tanks
 			if (!compatible) {
 				return;
 			}
-
-			if (HighLogic.LoadedSceneIsFlight) {
-				CalculateTankLossFunction (TimeWarp.fixedDeltaTime);
+			//print ("[Real Fuels]" + Time.time.ToString ());
+			if (HighLogic.LoadedSceneIsFlight)
+            {
+#if DEBUG
+                //debug1Display = part.skinInternalConductionMult.ToString ("F12");
+                //debug2Display = FormatFlux (part.skinToInternalFlux * (part.skinTemperature - part.temperature));
+                debug1Display = "";
+                debug2Display = "";
+#endif
+                //debug1Display = (part.thermalRadiationFlux / part.radiativeArea).ToString("F");
+                if (tankArea == 0d)
+                    CalculateTankArea(out tankArea);
+                // Don't call tank loss function if we're in analytic mode. That's what the interface is for.
+                //if (TimeWarp.CurrentRate <= PhysicsGlobals.ThermalMaxIntegrationWarp)
+                    StartCoroutine(CalculateTankLossFunction (TimeWarp.fixedDeltaTime));
 			}
 		}
+
+        public double ConductionFactors { get { return MFSSettings.globalConductionCompensation == true ? PhysicsGlobals.ConductionFactor * PhysicsGlobals.SkinInternalConductionFactor : 1d; }} 
+        protected float tankArea;
         double boiloffMass = 0d;
+
         public double BoiloffMassRate { get { return boiloffMass; } }
 
-		private void CalculateTankLossFunction (double deltaTime)
+        private IEnumerator CalculateTankLossFunction (float deltaTime, bool analyticalMode = false)
 		{
+			// Need to ensure that all heat compensation (radiators, heat pumps, etc) run first.
+			yield return new WaitForFixedUpdate();
             boiloffMass = 0d;
+
+            double minTemp = part.temperature;
+            for (int i = tankList.Count - 1; i >= 0; --i)
+            {
+                FuelTank tank = tankList[i];
+                if (tank.amount > 0d && (tank.vsp > 0.0 || tank.loss_rate > 0d))
+                    minTemp = Math.Min(minTemp, tank.temperature);
+            }
+
+            part.radiatorMax = (minTemp * 0.9d) / part.maxTemp;
             if (vessel != null && vessel.situation == Vessel.Situations.PRELAUNCH)
             {
-                double minTemp = part.temperature;
-                for (int i = tankList.Count - 1; i >= 0; --i)
-                {
-                    FuelTank tank = tankList[i];
-                    if (tank.amount > 0d && tank.loss_rate > 0d)
-                        minTemp = Math.Min(minTemp, tank.temperature);
-                }
                 part.temperature = minTemp;
+                part.skinTemperature = minTemp;
             }
             else
             {
+				partPrevTemperature = part.temperature;
+
                 double deltaTimeRecip = 1d / deltaTime;
                 for (int i = tankList.Count - 1; i >= 0; --i)
                 {
                     FuelTank tank = tankList[i];
 
-                    if (tank.loss_rate > 0 && tank.amount > 0)
-                    {
-                        double deltaTemp = part.temperature - tank.temperature;
-                        if (deltaTemp > 0)
-                        {
-                            double lossAmount = tank.maxAmount * tank.loss_rate * deltaTemp * deltaTime;
-                            if(lossAmount > tank.amount)
+					if (tank.amount > 0d)
+					{
+						if (tank.vsp > 0.0)
+						{
+                            // Opposite of original boil off code. Finds massLost first.
+                            double massLost = 0.0;
+                            double deltaTemp = part.temperature - tank.temperature;
+
+#if DEBUG
+                            if (debug2Display != "")
+                                debug2Display += " / ";
+
+                            if (debug1Display != "")
+                                debug1Display += " / ";
+#endif
+                            if (deltaTemp > 0)
                             {
-                                lossAmount = -tank.amount;
-                                tank.amount = 0d;
+
+                                //double tankConductivity = 0.03999680026; // Equal to 10cm aluminum + 10cm polyurethane insulation. Conductivity 250 and 0.02.
+                                //Equation: (0.2/ 0.1/205 + 0.1/0.02)
+
+								double tankRatio = tank.maxAmount / volume;
+
+								double area = tankArea * tankRatio;
+
+                                double q = deltaTemp / ((tank.wallThickness / ((tank.wallConduction / ConductionFactors) * area)) + (tank.insulationThickness / ((tank.insulationConduction / ConductionFactors) * area)));
+                                Debug.Log (part.name + " area: " + area);
+								if (MFSSettings.ferociousBoilOff)
+                                    q *= (part.thermalMass / (part.thermalMass - part.resourceThermalMass)) * tankRatio;
+
+                                //q /= ConductionFactors;
+
+                                q *= 0.001d; // convert to kilowatts
+
+                                massLost = q / tank.vsp;
+#if DEBUG
+                                // Only do debugging displays if compiled for debugging.
+                                debug1Display += FormatFlux(q);
+                                debug2Display += (massLost * 1000 * 3600).ToString("F4") + "kg/hr";
+                                //debug2Display += area.ToString("F2");
+
+                                //debug1Display = tank.wallThickness + " / " + tank.wallConduction;
+                                //debug2Display = tank.insulationThickness + " / " + tank.insulationConduction;
+
+#endif
+                                massLost *= deltaTime; // Frame scaling
                             }
+
+							double lossAmount = massLost / tank.density;
+							boiloffMass += massLost;
+
+                            if (double.IsNaN(lossAmount))
+                                Debug.Log("[MFT] " + tank.name + " lossAmount is NaN!");
                             else
                             {
-                                lossAmount = -lossAmount;
-                                tank.amount += lossAmount;
+                                if (lossAmount > tank.amount)
+                                {
+                                    tank.amount = 0d;
+                                } 
+                                else
+                                {
+                                    tank.amount -= lossAmount;
+
+                                    double fluxLost = -massLost * tank.vsp;
+
+                                    fluxLost *= ConductionFactors;
+
+                                    part.AddThermalFlux(fluxLost * deltaTimeRecip);
+
+                                    // subtract heat from boiloff
+                                    // TODO Fix analytic mode behavior or remove this. (currently unused as analyticMode is always false)
+                                    if (analyticalMode)
+                                        previewInternalFluxAdjust += fluxLost;
+                                    else
+                                        part.AddThermalFlux(fluxLost * deltaTimeRecip);
+                                }
                             }
-                            double vsp = 0d;
-                            double massLost = tank.density * lossAmount;
-                            boiloffMass += massLost;
-                            if (MFSSettings.resourceVsps.TryGetValue(tank.name, out vsp))
-                            {
-                                // subtract heat from boiloff
-                                part.AddThermalFlux(massLost * vsp * deltaTimeRecip);
-                            }
-                        }
-                    }
+						}
+						else if (tank.loss_rate > 0 && tank.amount > 0)
+						{
+							double deltaTemp = part.temperature - tank.temperature;
+							if (deltaTemp > 0)
+	                        {
+	                            double lossAmount = tank.maxAmount * tank.loss_rate * deltaTemp * deltaTime;
+	                            if(lossAmount > tank.amount)
+	                            {
+	                                lossAmount = -tank.amount;
+	                                tank.amount = 0d;
+	                            }
+	                            else
+	                            {
+	                                lossAmount = -lossAmount;
+	                                tank.amount += lossAmount;
+	                            }
+	                            double massLost = tank.density * lossAmount;
+	                            boiloffMass += massLost;
+	                        }
+	                    }
+					}
                 }
             }
 		}
+
+        // Analytic Interface
+        public void SetAnalyticTemperature(FlightIntegrator fi, double analyticTemp, double toBeInternal, double toBeSkin)
+        {
+            analyticSkinTemp = toBeSkin;
+        }
+
+        public double GetSkinTemperature(out bool lerp)
+        {
+            lerp = true;
+            return analyticSkinTemp;
+        }
+
+        public double GetInternalTemperature(out bool lerp)
+        {
+            lerp = true;
+            //if (partPrevTemperature == -1)
+                return part.temperature;
+            //else
+            //    return partPrevTemperature;
+        }
+
+        // Analytic Preview Interface
+        public void AnalyticInfo(FlightIntegrator fi, double sunAndBodyIn, double backgroundRadiation, double radArea, double internalFlux, double convCoeff, double ambientTemp, double maxPartTemp)
+        {
+            //analyticalInternalFlux = internalFlux;
+            float deltaTime = (float)(Planetarium.GetUniversalTime() - vessel.lastUT);
+            //CalculateTankLossFunction(deltaTime, true);
+        }
+
+        public double InternalFluxAdjust()
+        {
+            return previewInternalFluxAdjust;
+        }
+
+
 
 		// The active fuel tanks. This will be the list from the tank type, with any overrides from the part file.
 		internal FuelTankList tankList = new FuelTankList ();
@@ -365,7 +510,7 @@ namespace RealFuels.Tanks
 
 		public string[] typesAvailable;
 
-		// for EngineIgnitor integration: store a public list of the fuel tanks, and 
+		// for EngineIgnitor integration: store a public list of the fuel tanks, and
 		[NonSerialized]
 		public List<FuelTank> fuelList = new List<FuelTank> ();
 		// for EngineIgnitor integration: store a public dictionary of all pressurized propellants
@@ -373,6 +518,8 @@ namespace RealFuels.Tanks
 		public Dictionary<string, bool> pressurizedFuels = new Dictionary<string, bool> ();
         [KSPField(guiActiveEditor = true, guiName = "Highly Pressurized?")]
         public bool highlyPressurized = false;
+
+        public double outerInsulationFactor = 1.0;
 
 		private void InitializeTankType ()
 		{
@@ -456,13 +603,13 @@ namespace RealFuels.Tanks
                 }
                 if (type == oldType) // if we didn't find a new one
                 {
-                    Debug.LogError("Unalbe to find a type that is tech-available for part " + part.name);
+                    Debug.LogError("Unable to find a type that is tech-available for part " + part.name);
                     return;
                 }
             }
 
 			oldType = type;
-            
+
             // Get pressurization
             highlyPressurized = def.highlyPressurized;
 
@@ -474,7 +621,7 @@ namespace RealFuels.Tanks
 				ConfigNode overNode = MFSSettings.GetOverrideList(part).FirstOrDefault(n => n.GetValue("name") == tank.name);
 
 				tankList.Add (tank.CreateCopy (this, overNode, initializeAmounts));
-			}
+            }
             tankList.TechAmounts(); // update for current techs
 
 			// Destroy any managed resources that are not in the new type.
@@ -498,6 +645,8 @@ namespace RealFuels.Tanks
 			if (!baseCostOverride) {
 				ParseBaseCost (def.baseCost);
 			}
+
+            ParseInsulationFactor(def.outerInsulationFactor);
 
             UpdateTFInterops();
 
@@ -529,6 +678,21 @@ namespace RealFuels.Tanks
 		[KSPField (isPersistant = false, guiActive = false, guiActiveEditor = true, guiName = "Volume")]
 		public string volumeDisplay;
 
+        // Note that the following two fields are highly variable and subject to the whims of whatever RF dev that might want to change them.
+        // (they only show up if this code is compiled in debug mode and are currently for debugging boiloff system)
+        [KSPField (isPersistant = false, guiActive = false, guiActiveEditor = false, guiName = "Heat Penetration", guiUnits = "")]
+		public string debug1Display;
+
+        [KSPField (isPersistant = false, guiActive = false, guiActiveEditor = false, guiName = "Boil-off Loss", guiUnits = "")]
+		public string debug2Display;
+
+        [KSPField(isPersistant = true)]
+		public double partPrevTemperature = -1;
+		
+        private double analyticSkinTemp;
+
+        private double previewInternalFluxAdjust;
+
 		public double UsedVolume
 		{
 			get; private set;
@@ -540,6 +704,36 @@ namespace RealFuels.Tanks
 				return volume - UsedVolume;
 			}
 		}
+
+		static string FormatFlux(double flux, bool scale = false)
+		{
+			string prefix = "";
+			if (flux < 0.0)
+			{
+				flux *= -1.0;
+				prefix = "-";
+			}
+            // TODO If scale then it should display in joules not watts
+			if (scale)
+				flux *= TimeWarp.fixedDeltaTime;
+			if (flux >= 1000000000000000.0)
+				return prefix + (flux / 1000000000000000.0).ToString("F2") + " EW";
+			else if (flux >= 1000000000000.0)
+				return prefix + (flux / 1000000000000.0).ToString("F2") + " PW";
+			else if (flux >= 1000000000.0)
+				return prefix + (flux / 1000000000.0).ToString("F2") + " TW";
+			else if (flux >= 1000000.0)
+				return prefix + (flux / 1000000.0).ToString("F2") + " GW";
+			else if (flux >= 1000.0)
+				return prefix + (flux / 1000.0).ToString("F2") + " MW";
+			else if (flux >= 1.0)
+				return prefix + (flux).ToString("F2") + " kW";
+			else if (flux < 1.0)
+				return prefix + (flux * 1000.0).ToString("F2") + " W";
+			else
+				return "ERROR";
+		}
+
 
 		// Conversion between tank volume in kL, and whatever units this tank uses.
 		// Default to 1000 for RF. Varies for MFT. Needed to interface with PP.
@@ -624,10 +818,10 @@ namespace RealFuels.Tanks
 
 			oldUtilization = utilization;
 
-			ChangeTotalVolume (totalVolume);			
+			ChangeTotalVolume (totalVolume);
 		}
 
-		private void InitializeUtilization () 
+		private void InitializeUtilization ()
 		{
 			Fields["utilization"].guiActiveEditor = MFSSettings.partUtilizationTweakable || utilizationTweakable;
 		}
@@ -715,6 +909,21 @@ namespace RealFuels.Tanks
 			}
 		}
 
+        private void ParseInsulationFactor(ConfigNode node)
+        {
+            if (!node.HasValue("outerInsulationFactor"))
+                return;
+
+            string insulationFactor = node.GetValue("outerInsulationFactor");
+			ParseInsulationFactor (insulationFactor);
+        }
+
+        private void ParseInsulationFactor(string insulationFactor)
+        {
+            if (!double.TryParse(insulationFactor, out outerInsulationFactor))
+                Debug.LogWarning("[MFT] Unable to parse outerInsulationFactor");
+        }
+
 		public void CalculateMass ()
 		{
 			if (tankList == null || !massDirty) {
@@ -760,6 +969,19 @@ namespace RealFuels.Tanks
 				UpdateTweakableMenu ();
 			}
 		}
+
+        public void CalculateTankArea(out float totalTankArea)
+        {
+            totalTankArea = 0f;
+
+            for (int i = 0; i < 6; ++i)
+            {
+                totalTankArea += part.DragCubes.WeightedArea[i];
+            }
+            Debug.Log("[MFT] Part WeightedArea: " + part.name + " = " + totalTankArea.ToString("F2"));
+            Debug.Log("[MFT] Part Area: " + part.name + " = " + part.DragCubes.Area.ToString("F2"));
+        }
+
 		// mass-change interface, so Engineer's Report / Pad limit checking is correct.
 		public float massDelta = 0f; // assigned whenever part.mass is changed.
 		public float GetModuleMass(float defaultMass)

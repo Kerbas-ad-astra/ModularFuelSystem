@@ -21,6 +21,8 @@ namespace RealFuels.Tanks
 	//              of tank installed for this resource type. Tons per
 	//              volume unit.
 	// loss_rate    How quickly this resource type bleeds out of the tank.
+    //
+    //
 
 	public class FuelTank: IConfigNode
 	{
@@ -35,8 +37,21 @@ namespace RealFuels.Tanks
 		public float mass = 0.0f;
 		[Persistent]
 		public float cost = 0.0f;
+        // TODO Retaining for fallback purposes but should be deprecated eventually
 		[Persistent]
 		public double loss_rate = 0.0;
+        // representing conduction factor from Fourier conduction formula.
+        public double vsp;
+
+        //[Persistent]
+        public double wallThickness = 0.1;
+        //[Persistent]
+        public double wallConduction = 205; // Aluminum conductive factor
+        //[Persistent]
+        public double insulationThickness = 0.0;
+        //[Persistent]
+        public double insulationConduction = 1.0;
+
 		[Persistent]
 		public float temperature = 300.0f;
 		[Persistent]
@@ -216,7 +231,7 @@ namespace RealFuels.Tanks
 			node.AddValue ("amount", value);
 			node.AddValue ("maxAmount", value);
 #if DEBUG
-			print (node.ToString ());
+			MonoBehaviour.print (node.ToString ());
 #endif
 			partResource = part.AddResource (node);
 			partResource.enabled = true;
@@ -300,6 +315,16 @@ namespace RealFuels.Tanks
 			maxAmountExpression = node.GetValue ("maxAmount") ?? maxAmountExpression;
 
 			resourceAvailable = PartResourceLibrary.Instance.GetDefinition (name) != null;
+            MFSSettings.resourceVsps.TryGetValue(name, out vsp);
+
+            if (node.HasValue("wallThickness"))
+                double.TryParse(node.GetValue("wallThickness"), out wallThickness);
+            if (node.HasValue("wallConduction"))
+                double.TryParse(node.GetValue("wallConduction"), out wallConduction);
+            if (node.HasValue("insulationThickness"))
+                double.TryParse(node.GetValue("insulationThickness"), out insulationThickness);
+            if (node.HasValue("insulationConduction"))
+                double.TryParse(node.GetValue("insulationConduction"), out insulationConduction);
 
             GetDensity();
 		}
